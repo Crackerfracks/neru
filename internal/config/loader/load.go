@@ -3,6 +3,7 @@ package loader
 import (
 	"maps"
 	"os"
+	"slices"
 
 	"github.com/BurntSushi/toml"
 	"go.uber.org/zap"
@@ -19,6 +20,10 @@ const appConfigsKey = "app_configs"
 // modesKey names the table of user-declared modes, [modes.<name>], each of
 // which carries a hotkey table read the way the built-in modes' are.
 const modesKey = "modes"
+
+// hotkeysKey names every hotkey table. The typed decode skips the ones the
+// loader reads from the raw map, so those are not unknown keys.
+const hotkeysKey = "hotkeys"
 
 // LoadWithValidation turns a config file into the Config the daemon runs on.
 // It reports a rejection in the result rather than returning an error, so the
@@ -38,10 +43,12 @@ func (s *Service) LoadWithValidation(path string) *config.LoadResult {
 	// a line that loads and does nothing long before validation runs.
 	warnings := &config.Warnings{}
 
-	raw, decodeErr := s.decodeConfigFile(result.Config, result.ConfigPath)
+	raw, undecoded, decodeErr := s.decodeConfigFile(result.Config, result.ConfigPath)
 	if decodeErr != nil {
 		return refuse(result, decodeErr)
 	}
+
+	warnUnknownKeys(warnings, undecoded, result.Config)
 
 	globalErr := s.applyGlobalHotkeys(result.Config, raw, warnings)
 	if globalErr != nil {
@@ -207,26 +214,73 @@ func (s *Service) locateConfigFile(result *config.LoadResult, path string) bool 
 	return true
 }
 
-// decodeConfigFile reads the file twice, into a raw map and into the Config.
+// decodeConfigFile reads the file twice, into a raw map and into the Config,
+// and returns the keys the typed pass found no field for.
 //
 // The hotkey tables need the raw map: their merge rules (the disable sentinel,
 // folding a user's casing onto a default key) are not expressible as struct
 // tags, and the fields carry toml:"-" so the typed pass skips them. The typed
 // pass validates everything else. The TOML library cannot do both at once.
-func (s *Service) decodeConfigFile(cfg *config.Config, path string) (map[string]any, error) {
+func (s *Service) decodeConfigFile(
+	cfg *config.Config,
+	path string,
+) (map[string]any, []toml.Key, error) {
 	var raw map[string]any
 
 	_, rawErr := toml.DecodeFile(path, &raw)
 	if rawErr != nil {
-		return nil, derrors.WrapConfigFailed(rawErr, "parse config file")
+		return nil, nil, derrors.WrapConfigFailed(rawErr, "parse config file")
 	}
 
-	_, typedErr := toml.DecodeFile(path, cfg)
+	meta, typedErr := toml.DecodeFile(path, cfg)
 	if typedErr != nil {
-		return nil, derrors.WrapConfigFailed(typedErr, "parse config file")
+		return nil, nil, derrors.WrapConfigFailed(typedErr, "parse config file")
 	}
 
-	return raw, nil
+	return raw, meta.Undecoded(), nil
+}
+
+// warnUnknownKeys reports each key in the file that no option reads, so a
+// misspelled key does not pass for a working line. It warns rather than
+// refuses, because the loader replaces a refused file whole with the defaults
+// (ADR 0002). It reports an unknown table once, not once per key inside it,
+// which relies on the decoder listing a table before its keys.
+func warnUnknownKeys(warnings *config.Warnings, undecoded []toml.Key, cfg *config.Config) {
+	var reported []toml.Key
+
+	for _, key := range undecoded {
+		if readsHotkeyTable(key, cfg) {
+			continue
+		}
+
+		if slices.ContainsFunc(reported, func(table toml.Key) bool {
+			return len(table) < len(key) && slices.Equal(table, key[:len(table)])
+		}) {
+			continue
+		}
+
+		reported = append(reported, key)
+		warnings.Addf("%s: not a Neru option, so it does nothing", key)
+	}
+}
+
+// readsHotkeyTable reports whether key is in a hotkey table the loader reads
+// from the raw map: [hotkeys], a built-in mode's [<mode>.hotkeys], or a
+// declared mode's [modes.<name>.hotkeys]. Nothing reads a hotkeys table
+// anywhere else, such as [general.hotkeys], so it is an unknown key.
+func readsHotkeyTable(key toml.Key, cfg *config.Config) bool {
+	switch {
+	case key[0] == hotkeysKey:
+		return true
+	case len(key) >= 3 && key[0] == modesKey && key[2] == hotkeysKey:
+		return true
+	case len(key) >= 2 && key[1] == hotkeysKey:
+		return slices.ContainsFunc(modeHotkeyTargets(cfg), func(target modeHotkeyTarget) bool {
+			return target.modeKey == key[0]
+		})
+	default:
+		return false
+	}
 }
 
 // applyGlobalHotkeys merges the [hotkeys] table over the default bindings.
