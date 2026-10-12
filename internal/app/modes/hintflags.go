@@ -9,6 +9,11 @@ import (
 // fresh activation and a refresh read an absent flag differently, which is
 // why this is two paths.
 func applyHintFlags(ctx *hints.Context, activation modecmd.Activation, isRefresh bool) {
+	// A refresh does not inherit where the elements come from, so one that
+	// supplies no targets scans. The re-activations inside a session carry
+	// the session's targets for that reason.
+	ctx.SetTargets(activation.Targets)
+
 	if isRefresh {
 		applyHintFlagOverrides(ctx, activation)
 
