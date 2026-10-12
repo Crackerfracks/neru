@@ -55,6 +55,58 @@ func TestBus_Publish_CountsWhatAFullSubscriberMissed(t *testing.T) {
 	}
 }
 
+// TestBus_SubscribeTo_OffersOnlyTheEventsNamed pins a filtered subscription:
+// it receives only the events it named, an event left out never counts as
+// missed however many go by, and the numbers stay the bus's own.
+func TestBus_SubscribeTo_OffersOnlyTheEventsNamed(t *testing.T) {
+	bus := event.NewBus(nil)
+
+	sub := bus.SubscribeTo(1, []event.Name{event.Enable})
+	defer sub.Stop()
+
+	for range 5 {
+		bus.Publish(event.Event{Name: event.Disable})
+	}
+
+	bus.Publish(event.Event{Name: event.Enable})
+
+	if got := <-sub.Events(); got.Name != event.Enable || got.Seq != 6 || got.Dropped != 0 {
+		t.Errorf("event = %+v, want enable at seq 6 with nothing dropped", got)
+	}
+}
+
+// TestSubscription_Drain_TakesEverythingTheBufferHolds pins the catch-up a
+// reader asks for: every queued event and every loss, counted with the newest
+// event's number, which covers all of them, and none reported again after.
+func TestSubscription_Drain_TakesEverythingTheBufferHolds(t *testing.T) {
+	bus := event.NewBus(nil)
+
+	sub := bus.SubscribeTo(2, nil)
+	defer sub.Stop()
+
+	for range 5 {
+		bus.Publish(event.Event{Name: event.Enable})
+	}
+
+	if missed := sub.Missed(); missed != 3 {
+		t.Fatalf("Missed() = %d, want the 3 the full buffer lost", missed)
+	}
+
+	if taken, seq := sub.Drain(); taken != 5 || seq != 5 {
+		t.Fatalf("Drain() = %d, %d, want the 2 queued and 3 lost, through seq 5", taken, seq)
+	}
+
+	if missed := sub.Missed(); missed != 0 {
+		t.Errorf("Missed() after Drain = %d, want the loss already taken", missed)
+	}
+
+	bus.Publish(event.Event{Name: event.Disable})
+
+	if got := <-sub.Events(); got.Seq != 6 || got.Dropped != 0 {
+		t.Errorf("next event = %+v, want seq 6 with nothing dropped", got)
+	}
+}
+
 func TestBus_Publish_DoesNotBlockOnASubscriberThatNeverReads(t *testing.T) {
 	bus := event.NewBus(nil)
 
