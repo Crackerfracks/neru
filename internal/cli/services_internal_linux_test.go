@@ -293,6 +293,77 @@ func TestDescribeServiceStatus_NamesEveryState(t *testing.T) {
 	}
 }
 
+// TestReportServiceStatus_SetsTheFlagsAScriptReads pins the booleans
+// `neru services status --json` prints for each gathered state.
+func TestReportServiceStatus_SetsTheFlagsAScriptReads(t *testing.T) {
+	testCases := []struct {
+		name  string
+		state serviceUnitState
+		want  serviceStatus
+	}{
+		{
+			name:  "no systemd on the machine",
+			state: serviceUnitState{unitPath: testDefaultUnitPath},
+			want:  serviceStatus{},
+		},
+		{
+			name:  "systemd, but the unit was never installed",
+			state: serviceUnitState{systemdBooted: true, unitPath: testDefaultUnitPath},
+			want:  serviceStatus{Supported: true},
+		},
+		{
+			name: "installed, running and enabled",
+			state: serviceUnitState{
+				systemdBooted: true,
+				installed:     true,
+				active:        "active",
+				enabled:       unitEnabled,
+			},
+			want: serviceStatus{
+				Supported:     true,
+				Installed:     true,
+				Running:       true,
+				StartsAtLogin: true,
+			},
+		},
+		{
+			name: "installed, failed and disabled",
+			state: serviceUnitState{
+				systemdBooted: true,
+				installed:     true,
+				active:        "failed",
+				enabled:       unitDisabled,
+			},
+			want: serviceStatus{Supported: true, Installed: true},
+		},
+		{
+			name: "installed, but the user manager did not answer",
+			state: serviceUnitState{
+				systemdBooted: true,
+				installed:     true,
+				active:        "Failed to connect to bus: No medium found",
+				enabled:       systemctlNoAnswer,
+			},
+			want: serviceStatus{
+				Supported: true,
+				Installed: true,
+				Error:     "systemctl could not read the unit: Failed to connect to bus: No medium found",
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := reportServiceStatus(testCase.state, "")
+			got.Message = ""
+
+			if got != testCase.want {
+				t.Errorf("reportServiceStatus() = %+v, want %+v", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestRenderServiceUnit_AnchorsOnTheGraphicalSession(t *testing.T) {
 	unit := renderServiceUnit("/usr/local/bin/neru")
 

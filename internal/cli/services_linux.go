@@ -621,12 +621,15 @@ func describeServiceStatus(state serviceUnitState, docsURL string) string {
 	return "Service installed: " + state.active + ", " + state.enabled + " at login"
 }
 
-func statusService() string {
+func statusService() serviceStatus {
 	docsURL := buildinfo.DocsURL(linuxServicesDocs, buildinfo.Version)
 
 	unitPath, err := serviceUnitPath()
 	if err != nil {
-		return "Service status unavailable: " + err.Error()
+		return serviceStatus{
+			Message: "Service status unavailable: " + err.Error(),
+			Error:   err.Error(),
+		}
 	}
 
 	state := serviceUnitState{
@@ -635,19 +638,46 @@ func statusService() string {
 	}
 
 	if !state.systemdBooted {
-		return describeServiceStatus(state, docsURL)
+		return reportServiceStatus(state, docsURL)
 	}
 
 	state.installed = serviceUnitExists(unitPath)
 	if !state.installed {
-		return describeServiceStatus(state, docsURL)
+		return reportServiceStatus(state, docsURL)
 	}
 
 	state.active = systemctlWord("is-active")
 	state.enabled = systemctlWord("is-enabled")
 
-	return describeServiceStatus(state, docsURL)
+	return reportServiceStatus(state, docsURL)
 }
+
+// reportServiceStatus is a gathered state as `neru services status` reports it.
+func reportServiceStatus(state serviceUnitState, docsURL string) serviceStatus {
+	status := serviceStatus{
+		Supported:     state.systemdBooted,
+		Installed:     state.installed,
+		Running:       state.active == "active",
+		StartsAtLogin: state.enabled == unitEnabled,
+		Message:       describeServiceStatus(state, docsURL),
+	}
+
+	if state.installed {
+		for _, word := range []string{state.active, state.enabled} {
+			if !systemctlAnswered(word) {
+				status.Error = "systemctl could not read the unit: " + word
+
+				break
+			}
+		}
+	}
+
+	return status
+}
+
+// systemctlNoAnswer is what systemctlWord returns when systemctl printed
+// nothing, as when it timed out.
+const systemctlNoAnswer = "unknown"
 
 // systemctlWord reads a one-word query such as is-active or is-enabled.
 // Both exit non-zero for a perfectly ordinary answer ("inactive", "disabled"),
@@ -655,8 +685,15 @@ func statusService() string {
 func systemctlWord(query string) string {
 	output, _ := systemctl(query, serviceUnitName)
 	if output == "" {
-		return "unknown"
+		return systemctlNoAnswer
 	}
 
 	return output
+}
+
+// systemctlAnswered reports whether word is an answer from systemd. systemd
+// answers in single words. A failed read prints a sentence, such as "Failed
+// to connect to bus", or nothing.
+func systemctlAnswered(word string) bool {
+	return word != systemctlNoAnswer && !strings.ContainsAny(word, " \t\n")
 }
