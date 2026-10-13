@@ -163,10 +163,6 @@ type Client struct {
 	savedIsOn bool // original IsEnabled before our first enable
 	savedSrOn bool // original ScreenReaderEnabled before our first enable
 
-	// Event-driven active-window cache. A background listener records the AT-SPI
-	// window that most recently emitted a window:activate event, so frame
-	// selection can skip the registry scan entirely when the cached window still
-	// matches the compositor's focused toplevel. See events.go.
 	// titleMatched maps a focused app_id that no AT-SPI application name
 	// answers to onto the bus name of the application whose window title
 	// matched it, so findFrameByTitle scans the bus once per app rather than
@@ -183,6 +179,10 @@ type Client struct {
 	titleMatched   map[string]string
 	titleMissed    map[string]uint64
 
+	// Event-driven active-window cache. A background listener records the AT-SPI
+	// window that most recently emitted a window:activate event, so frame
+	// selection can skip the registry scan entirely when the cached window still
+	// matches the compositor's focused toplevel. See events.go.
 	activeMu     sync.Mutex
 	activeWindow *atspiActiveWindow // nil until the first window:activate arrives
 	eventsReady  bool               // true once the listener is registered on c.a11y

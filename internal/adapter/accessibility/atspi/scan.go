@@ -265,8 +265,9 @@ func (c *Client) findActiveFrame(
 // than one frame shares identifies no window, so it returns none. names are
 // the application names the probe already read, one per app.
 //
-// It reads every application's frames, which on a desktop with many apps open
-// is the cost the remembered match (rememberTitleMatch) pays once per app.
+// It reads every application's frames. rememberTitleMatch and
+// rememberTitleMiss make that a cost each app pays once, not on every
+// activation, on a desktop with many apps open.
 func (c *Client) findFrameByTitle(
 	ctx context.Context,
 	conn *dbus.Conn,
@@ -293,9 +294,9 @@ func (c *Client) findFrameByTitle(
 	return cand.focusedTitleFrame, scanned, true
 }
 
-// maxTitleMatches bounds the remembered title matches. Each is two short
-// strings, and a session rarely runs more distinct apps than this, so the map
-// starts over rather than tracking which entry is oldest.
+// maxTitleMatches bounds each map of remembered title scans. An entry is a
+// short key and value, and a session rarely runs more distinct apps than this,
+// so a full map starts over rather than tracking which entry is oldest.
 const maxTitleMatches = 64
 
 // rememberTitleMatch records that busName's window answered to focusedAppID by
