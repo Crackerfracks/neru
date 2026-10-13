@@ -301,11 +301,20 @@ func TestClient_FindFrameByTitle_PicksTheOneWindowWithTheFocusedTitle(t *testing
 
 			client := New(zap.NewNop(), nil)
 
+			// Frame selection's own diagnostic must hear about a failed read.
+			caller := &atspiScanDiag{}
+			ctx := context.WithValue(t.Context(), atspiScanDiagKey{}, caller)
+
 			got, _, found, none := client.findFrameByTitle(
-				t.Context(), scanner, test.apps, appNames, test.title)
+				ctx, scanner, test.apps, appNames, test.title)
 			if got != test.want || found != test.wantFound || none != test.wantNone {
 				t.Errorf("findFrameByTitle(%q) = %v, found %v, none %v, want %v, %v, %v",
 					test.title, got, found, none, test.want, test.wantFound, test.wantNone)
+			}
+
+			if failed := caller.fatalErr() != nil; failed != slices.Contains(test.apps, gone) {
+				t.Errorf("the caller's diagnostic recorded a failure: %v, want %v",
+					failed, slices.Contains(test.apps, gone))
 			}
 		})
 	}

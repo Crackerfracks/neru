@@ -335,8 +335,11 @@ func (c *Client) findFrameByTitle(
 	names []string,
 	focusedTitle string,
 ) (accRef, int, bool, bool) {
+	// The scan keeps its own diagnostic to tell a clean miss from a failed
+	// one, and passes any failure on to the caller's, so frame selection still
+	// reports it.
 	diag := &atspiScanDiag{}
-	ctx = context.WithValue(ctx, atspiScanDiagKey{}, diag)
+	scanCtx := context.WithValue(ctx, atspiScanDiagKey{}, diag)
 
 	metas := make([]appMeta, len(apps))
 	for index, name := range names {
@@ -347,14 +350,19 @@ func (c *Client) findFrameByTitle(
 		}
 	}
 
-	scans, scanned := c.scanApps(ctx, conn, apps, metas, true, focusedTitle, true)
+	scans, scanned := c.scanApps(scanCtx, conn, apps, metas, true, focusedTitle, true)
+
+	failure := diag.fatalErr()
+	if failure != nil {
+		c.noteCallErr(ctx, failure)
+	}
 
 	cand := mergeFrameScan(scans)
 	if cand.focusedTitleCount == 1 {
 		return cand.focusedTitleFrame, scanned, true, false
 	}
 
-	clean := diag.fatalErr() == nil && ctx.Err() == nil
+	clean := failure == nil && ctx.Err() == nil
 
 	return accRef{}, scanned, false, cand.focusedTitleCount == 0 && clean
 }
