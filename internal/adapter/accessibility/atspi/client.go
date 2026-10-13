@@ -41,16 +41,19 @@ const (
 	atspiComponentIfc  = "org.a11y.atspi.Component"
 	atspiTextIfc       = "org.a11y.atspi.Text"
 
-	// ATSPI_COORD_TYPE_SCREEN: extents relative to the screen origin.
+	// ATSPI_COORD_TYPE_SCREEN and ATSPI_COORD_TYPE_WINDOW: extents relative to
+	// the screen origin and to the top-level window.
 	atspiCoordScreen = uint32(0)
+	atspiCoordWindow = uint32(1)
 
 	// AT-SPI state bit indices (atspi-constants.h). All < 32, so they live in
 	// the first uint32 of the state bitfield array.
-	atspiStateActive   = 1
-	atspiStateEditable = 7
-	atspiStateEnabled  = 8
-	atspiStateFocused  = 12
-	atspiStateShowing  = 25
+	atspiStateActive    = 1
+	atspiStateEditable  = 7
+	atspiStateEnabled   = 8
+	atspiStateFocused   = 12
+	atspiStateSensitive = 24
+	atspiStateShowing   = 25
 
 	// Bit width of the int32 words AT-SPI packs its state and role sets into
 	// (one bit per state/role index).
@@ -316,54 +319,7 @@ func (c *Client) ClickableNodes(
 		return nil, nil
 	}
 
-	// Validate the compositor's origin against the frame actually being walked:
-	// an origin from a different window would offset every hint to the wrong
-	// screen position. The frame is described by its size and by the focused
-	// identity it was selected with, so a source that can compare identities
-	// (KWin) can tell apart two windows that a size comparison cannot. When the
-	// frame extents are unavailable the origin cannot be validated at all, so no
-	// offset is applied — unoffset hints beat hints offset to a previous window
-	// or monitor.
-	var (
-		offX, offY int
-		haveOrigin bool
-	)
-
-	frameRect, frameOK := c.extents(ctx, conn, win.ref)
-	if frameOK {
-		origin, originKnown, originErr := c.windowOrigin.originFor(windowFrame{
-			Width:        frameRect.Dx(),
-			Height:       frameRect.Dy(),
-			FocusedAppID: win.focusedAppID,
-			FocusedTitle: win.focusedTitle,
-		})
-		if originErr != nil {
-			// The two ways of having no origin are not the same event. A
-			// compositor that answered and has none to give is routine, and
-			// window-relative coordinates are the answer. A source that could
-			// not be asked leaves every hint in this window at the wrong screen
-			// position, and the reason has to be readable without a debug build.
-			c.reportOriginFailure(originErr)
-		} else {
-			// The source answered, which is what makes a later failure news
-			// again — whether or not it had a position to give. A tiled niri
-			// window and an unfocused desktop are working sources with nothing
-			// to report, so they end a recorded failure exactly as a window
-			// with an origin does.
-			c.clearOriginFailure()
-
-			if originKnown {
-				// AT-SPI reports element coordinates in the app's own space, where the
-				// frame content sits at frameRect.Min — non-zero when the toolkit adds a
-				// margin (e.g. a GTK client-side-decoration shadow). The compositor
-				// origin is the content's screen position, so shift element coordinates
-				// by (compositor origin − frame margin) to avoid a constant offset.
-				offX = origin.X - frameRect.Min.X
-				offY = origin.Y - frameRect.Min.Y
-				haveOrigin = true
-			}
-		}
-	}
+	place, haveOrigin := c.placementFor(ctx, conn, win)
 
 	// originFor reads the *current* focused window's geometry, so a focus change
 	// between the early-out above and that read would pair this frame with a
@@ -375,15 +331,15 @@ func (c *Client) ClickableNodes(
 
 	depth := c.treeDepth(maxDepth)
 	out, path, visited := c.scan(ctx, conn, win.ref, rolesSet(roles), depth,
-		image.Pt(offX, offY), readState)
+		place, readState)
 
 	c.logger.Debug("AT-SPI clickable scan complete",
 		zap.String("path", path),
 		zap.Int("count", len(out)),
 		zap.Int("visited", visited),
 		zap.Int("max_depth", depth),
-		zap.Int("offset_x", offX),
-		zap.Int("offset_y", offY),
+		zap.Int("offset_x", place.offset.X),
+		zap.Int("offset_y", place.offset.Y),
 		zap.Bool("have_origin", haveOrigin),
 		zap.Duration("elapsed", time.Since(start)))
 
@@ -478,6 +434,84 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// placement is how a scan turns an element's AT-SPI extents into screen
+// pixels: the coordinate type it reads them in and the offset it adds.
+type placement struct {
+	coordType uint32
+	offset    image.Point
+}
+
+// placementFor returns how to place the elements of win, and whether a
+// compositor origin was applied.
+//
+// Without an origin, the scan reads screen coordinates and uses them as they
+// are. Those are screen positions on X11 and for XWayland clients. A native
+// Wayland client reports window-relative numbers there, so its hints land
+// window-relative, which is the best Neru can do without an origin.
+//
+// With an origin, the scan reads window coordinates and adds the origin less
+// the frame's own window position, which a toolkit's margin, such as a
+// client-side-decoration shadow, makes non-zero. GTK 4 needs this, because it
+// reports a zero origin for every element in screen coordinates. Other
+// toolkits report the same numbers in both, and for XWayland clients the
+// frame position cancels out.
+//
+// placementFor checks the origin against the frame being walked, because an
+// origin from another window would move every hint to the wrong place. It
+// describes the frame by its size and by the focused identity it was selected
+// with, so a source that compares identities (KWin) can tell apart two windows
+// a size comparison cannot. Without frame extents it cannot check the origin,
+// so it applies none. Hints left window-relative beat hints moved to another
+// window or monitor.
+func (c *Client) placementFor(
+	ctx context.Context,
+	conn *dbus.Conn,
+	win *atspiWindow,
+) (placement, bool) {
+	screen := placement{coordType: atspiCoordScreen}
+
+	frameRect, frameOK := c.extents(ctx, conn, win.ref, atspiCoordScreen)
+	if !frameOK {
+		return screen, false
+	}
+
+	origin, originKnown, originErr := c.windowOrigin.originFor(windowFrame{
+		Width:        frameRect.Dx(),
+		Height:       frameRect.Dy(),
+		FocusedAppID: win.focusedAppID,
+		FocusedTitle: win.focusedTitle,
+	})
+	if originErr != nil {
+		// The two ways of having no origin are not the same event. A
+		// compositor that answered and has none to give is routine, and
+		// window-relative coordinates are the answer. A source that could not
+		// be asked leaves every hint in this window at the wrong screen
+		// position, and the reason has to be readable without a debug build.
+		c.reportOriginFailure(originErr)
+
+		return screen, false
+	}
+
+	// The source answered, which is what makes a later failure news again,
+	// whether or not it had a position to give. A tiled niri window and an
+	// unfocused desktop are working sources with nothing to report, so they
+	// end a recorded failure exactly as a window with an origin does.
+	c.clearOriginFailure()
+
+	if !originKnown {
+		return screen, false
+	}
+
+	frameInWindow, ok := c.extents(ctx, conn, win.ref, atspiCoordWindow)
+	if !ok {
+		// A toolkit that cannot answer in window coordinates keeps the
+		// screen-coordinate placement Neru used before GTK 4 needed this.
+		return placement{coordType: atspiCoordScreen, offset: origin.Sub(frameRect.Min)}, true
+	}
+
+	return placement{coordType: atspiCoordWindow, offset: origin.Sub(frameInWindow.Min)}, true
+}
+
 // The two ways a scan reads the window, as the scan-complete log names them.
 const (
 	scanPathCollection = "collection"
@@ -493,7 +527,7 @@ func (c *Client) scan(
 	root accRef,
 	roles map[string]struct{},
 	depth int,
-	offset image.Point,
+	place placement,
 	readState bool,
 ) ([]ax.Node, string, int) {
 	// Fast path: a single Collection.GetMatches call instead of the per-node
@@ -501,7 +535,7 @@ func (c *Client) scan(
 	// Collection matches the whole subtree and cannot stop at a depth, so a
 	// limit below the default goes to the walk.
 	if depth == 0 || depth >= config.DefaultMaxDepth {
-		nodes, ok := c.collectViaCollection(ctx, conn, root, roles, offset.X, offset.Y, readState)
+		nodes, ok := c.collectViaCollection(ctx, conn, root, roles, place, readState)
 		if ok {
 			return nodes, scanPathCollection, 0
 		}
@@ -514,7 +548,7 @@ func (c *Client) scan(
 
 	out := make([]ax.Node, 0, atspiClickableNodesCap)
 	visited := 0
-	c.walk(ctx, conn, root, roles, 0, limit, &out, &visited, offset.X, offset.Y, readState)
+	c.walk(ctx, conn, root, roles, 0, limit, &out, &visited, place, readState)
 
 	return out, scanPathWalk, visited
 }
@@ -551,7 +585,7 @@ func (c *Client) collectViaCollection(
 	conn *dbus.Conn,
 	root accRef,
 	roleSet map[string]struct{},
-	offX, offY int,
+	place placement,
 	readState bool,
 ) ([]ax.Node, bool) {
 	if os.Getenv("NERU_ATSPI_NO_COLLECTION") != "" {
@@ -643,7 +677,7 @@ func (c *Client) collectViaCollection(
 				return
 			}
 
-			node := c.materializeMatch(ctx, conn, ref, roleSet, offX, offY, readState)
+			node := c.materializeMatch(ctx, conn, ref, roleSet, place, readState)
 			if node != nil {
 				results[slot] = node
 
@@ -686,7 +720,7 @@ func (c *Client) materializeMatch(
 	conn *dbus.Conn,
 	ref accRef,
 	roleSet map[string]struct{},
-	offX, offY int,
+	place placement,
 	readState bool,
 ) *atspiNode {
 	// Re-verify the role is in the requested set: a toolkit may return a role we
@@ -710,7 +744,7 @@ func (c *Client) materializeMatch(
 		}
 	}
 
-	return c.readNode(ctx, conn, ref, roleName, image.Pt(offX, offY), readState)
+	return c.readNode(ctx, conn, ref, roleName, place, readState)
 }
 
 // D-Bus error names that mean the scan cannot make progress: the target
@@ -795,7 +829,7 @@ func (c *Client) name(ctx context.Context, conn *dbus.Conn, ref accRef) string {
 // never leaves the app.
 var atspiValueRoles = map[string]struct{}{atspiRoleEntry: {}, "spin button": {}}
 
-// readNode reads a matched element's bounds, shifted by offset, its title,
+// readNode reads a matched element's bounds as place says, its title,
 // description and, for a role in atspiValueRoles, its value. With readState it
 // also reads the identifier and focused state, which only `neru query hints`
 // reports. Each read costs the app time, so a hints-mode scan skips those two.
@@ -810,7 +844,7 @@ func (c *Client) readNode(
 	conn *dbus.Conn,
 	ref accRef,
 	roleName string,
-	offset image.Point,
+	place placement,
 	readState bool,
 ) *atspiNode {
 	callCtx, cancel := context.WithTimeout(ctx, atspiCallTimeout)
@@ -826,7 +860,7 @@ func (c *Client) readNode(
 		atspiComponentIfc+".GetExtents",
 		0,
 		nil,
-		atspiCoordScreen,
+		place.coordType,
 	)
 	nameCall := property("Name")
 	descriptionCall := property("Description")
@@ -846,7 +880,7 @@ func (c *Client) readNode(
 	node := &atspiNode{
 		id:          string(ref.Path) + "@" + ref.Name,
 		role:        roleName,
-		rect:        rect.Add(offset),
+		rect:        rect.Add(place.offset),
 		title:       c.propertyString(ctx, nameCall),
 		description: c.propertyString(ctx, descriptionCall),
 	}
@@ -934,8 +968,7 @@ func (c *Client) showingRole(
 	}
 
 	states, read := c.states(ctx, conn, ref)
-	if !read || !atspiStateBit(states, atspiStateShowing) ||
-		!atspiStateBit(states, atspiStateEnabled) {
+	if !read || !atspiStateBit(states, atspiStateShowing) || !atspiEnabled(states) {
 		return roleName, false
 	}
 
@@ -943,6 +976,14 @@ func (c *Client) showingRole(
 	_, wanted := roles[roleName]
 
 	return roleName, wanted
+}
+
+// atspiEnabled reports whether an element takes input. GTK 4 sets SENSITIVE
+// and never ENABLED, where other toolkits set both, so either one counts.
+// Collection asks for ENABLED alone, which is safe because GTK 4 does not
+// implement Collection and always reaches the walk.
+func atspiEnabled(states []uint32) bool {
+	return atspiStateBit(states, atspiStateEnabled) || atspiStateBit(states, atspiStateSensitive)
 }
 
 // atspiStateBit reports whether the given AT-SPI state bit is set in a state
@@ -968,17 +1009,18 @@ func (c *Client) frameStates(ctx context.Context, conn *dbus.Conn, ref accRef) (
 	return atspiStateBit(states, atspiStateActive), atspiStateBit(states, atspiStateShowing)
 }
 
-// extents returns the on-screen rectangle of an accessible.
+// extents returns the rectangle of an accessible in coordType.
 func (c *Client) extents(
 	ctx context.Context,
 	conn *dbus.Conn,
 	ref accRef,
+	coordType uint32,
 ) (image.Rectangle, bool) {
 	callCtx, cancel := context.WithTimeout(ctx, atspiCallTimeout)
 	defer cancel()
 
 	return c.extentsFrom(ctx, conn.Object(ref.Name, ref.Path).
-		GoWithContext(callCtx, atspiComponentIfc+".GetExtents", 0, nil, atspiCoordScreen))
+		GoWithContext(callCtx, atspiComponentIfc+".GetExtents", 0, nil, coordType))
 }
 
 // extentsFrom waits for a GetExtents call and returns the rectangle, or false
@@ -1002,8 +1044,7 @@ func (c *Client) walk(
 	maxDepth int,
 	out *[]ax.Node,
 	visited *int,
-	offX int,
-	offY int,
+	place placement,
 	readState bool,
 ) {
 	if depth > maxDepth || len(*out) >= atspiMaxNodes {
@@ -1026,15 +1067,13 @@ func (c *Client) walk(
 		strings.ToLower(c.roleName(ctx, conn, ref)))
 
 	if matched {
-		// AT-SPI reports window-relative coords on Wayland; offset by the
-		// focused window's screen origin from the KWin bridge.
-		node := c.readNode(ctx, conn, ref, roleName, image.Pt(offX, offY), readState)
+		node := c.readNode(ctx, conn, ref, roleName, place, readState)
 		if node != nil {
 			*out = append(*out, node)
 		}
 	}
 
 	for _, child := range c.children(ctx, conn, ref) {
-		c.walk(ctx, conn, child, roles, depth+1, maxDepth, out, visited, offX, offY, readState)
+		c.walk(ctx, conn, child, roles, depth+1, maxDepth, out, visited, place, readState)
 	}
 }

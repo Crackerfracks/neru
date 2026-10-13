@@ -236,7 +236,7 @@ load, and `neru doctor` lists it under `platform_support`.
 | **Strategies**          | `axtree` (default), `vision` and `contour`, incl. per-app overrides | `axtree`, `vision` (text only) and `contour` | `axtree`, `vision` (text only) and `contour` |
 | **Popovers / menus**    | dedicated detection                      | only if inside the active window                | none                              |
 | **Element text** (title, description, value) | `AXTitle`, `AXDescription`, `AXValue` when it is a string | `Name`, `Description`, and `Text.GetText` for the entry and spin button roles, never password text | `Name`, `HelpText`, and the Value pattern's value, never a password field's |
-| **Disabled elements** | skipped when `AXEnabled` is false | skipped without the ENABLED state, which the Collection query also asks for | skipped when `IsEnabled` is false, before their text is read |
+| **Disabled elements** | skipped when `AXEnabled` is false | skipped without the ENABLED or SENSITIVE state, since GTK 4 sets only SENSITIVE. The Collection query asks for ENABLED, and GTK 4 has no Collection | skipped when `IsEnabled` is false, before their text is read |
 | **Element identifier and focus** (`neru query hints` only) | `AXIdentifier` and `AXFocused`, in the attribute batch every element gets | `AccessibleId` and the FOCUSED state, read only for the query | `AutomationId` and `HasKeyboardFocus`, cached only for the query |
 
 On Linux, coverage depends on each app exposing AT-SPI. On Windows, an element
@@ -248,8 +248,15 @@ or filter setting ([Clickable roles](../reference/configuration.md#clickable-rol
 default. Launch them with `--force-renderer-accessibility`. Native GTK and Qt
 apps and Firefox need no flag.
 
-**Window-origin offset on Wayland.** AT-SPI positions are window-relative on
-Wayland, so Neru asks the compositor for the window's screen origin:
+**Window-origin offset on Wayland.** AT-SPI positions of native Wayland
+clients are window-relative, so Neru asks the compositor for the window's
+screen origin. When it gets one, it reads element positions in window
+coordinates and adds the origin, less the frame's own window position. When it
+gets none, it reads screen coordinates and uses them as they are, which is
+right on X11 and for XWayland clients. The choice is made per scan because GTK
+4 reports a zero origin for every element in screen coordinates. Native
+Firefox, Chromium, Qt and GTK 3 clients report the same numbers in both,
+measured on niri.
 
 | Compositor | Source                                                       | Limits                                                                                                                    |
 | ---------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
