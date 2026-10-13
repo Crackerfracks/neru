@@ -196,6 +196,9 @@ func (c *Client) findActiveFrame(
 			}
 
 			c.rememberTitleMiss(focusedAppID, focusedTitle, apps)
+			c.logger.Debug("AT-SPI title scan found no window",
+				zap.Int("apps", len(apps)),
+				zap.Int("frames_scanned", scanned))
 		}
 
 		switch {
