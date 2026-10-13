@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.59.0](https://github.com/y3owk1n/neru/compare/v1.58.0...v1.59.0) (2026-10-13)
+
+
+### Features
+
+* **hints:** detect button shapes in the vision strategy on Linux and Windows ([#1800](https://github.com/y3owk1n/neru/issues/1800)) ([2dd7779](https://github.com/y3owk1n/neru/commit/2dd7779ac142c1e19fa296b84edf09443ee4a8bc))
+* **hints:** honour hints.max_depth on Linux and Windows ([#1788](https://github.com/y3owk1n/neru/issues/1788)) ([9644301](https://github.com/y3owk1n/neru/commit/964430175595edb8acd387560c8a4d8da23676eb))
+* **hints:** honour ignore_clickable_check on Linux and Windows ([#1798](https://github.com/y3owk1n/neru/issues/1798)) ([58b43ad](https://github.com/y3owk1n/neru/commit/58b43ad1edaa7bb09623d26c9bdde9eec50bb738))
+* **hints:** honour visible_check_enabled on Linux ([#1799](https://github.com/y3owk1n/neru/issues/1799)) ([cfcb4e0](https://github.com/y3owk1n/neru/commit/cfcb4e02747dac268b4d13a4d4d154c7b020fa75))
+* **hints:** report source, identifier and focus, and skip disabled elements ([#1787](https://github.com/y3owk1n/neru/issues/1787)) ([b23012e](https://github.com/y3owk1n/neru/commit/b23012eb5902227fd78e74f8aff11495e5532a40))
+* **hints:** type into hint search through a real text field on Wayland ([#1802](https://github.com/y3owk1n/neru/issues/1802)) ([4533bdb](https://github.com/y3owk1n/neru/commit/4533bdb6aebf9f59664cdb732ef6e77cb4262556))
+* **hints:** type into hint search through a real text field on Windows ([#1803](https://github.com/y3owk1n/neru/issues/1803)) ([1927af4](https://github.com/y3owk1n/neru/commit/1927af496ac09fde0ec8482dccc325c00d92739e))
+* **hints:** type into hint search through a real text field on X11 ([#1804](https://github.com/y3owk1n/neru/issues/1804)) ([2ef0970](https://github.com/y3owk1n/neru/commit/2ef0970bbc2a0d9547e27fb75af7489e417853bc))
+
+
+### Bug Fixes
+
+* **hints:** keep capital letters typed into hint search on Linux and Windows ([#1801](https://github.com/y3owk1n/neru/issues/1801)) ([e2bb9a8](https://github.com/y3owk1n/neru/commit/e2bb9a8dc14a9a62a4eabb43bc09ca615b180c87))
+* **hints:** read element description and value on Linux and Windows ([#1786](https://github.com/y3owk1n/neru/issues/1786)) ([79e40a0](https://github.com/y3owk1n/neru/commit/79e40a00f9ff02eb5fe7c8c29e2cf4a5dbd0b020))
+* **linux:** hint GNOME apps whose name differs from their app id ([#1790](https://github.com/y3owk1n/neru/issues/1790)) ([e0d08c1](https://github.com/y3owk1n/neru/commit/e0d08c13945aa236082ad2dcbf793b1ab6f35b6e))
+* **linux:** hint GTK 3 text fields ([#1784](https://github.com/y3owk1n/neru/issues/1784)) ([66de454](https://github.com/y3owk1n/neru/commit/66de4545326b631cb04cdbce55202d7b05a79ce8))
+* **linux:** hint GTK 4 apps again and place them where the window position is known ([#1789](https://github.com/y3owk1n/neru/issues/1789)) ([4da72d3](https://github.com/y3owk1n/neru/commit/4da72d350a9fedb4e22305580e612a8503946909))
+
 ## [1.58.0](https://github.com/y3owk1n/neru/compare/v1.57.0...v1.58.0) (2026-10-12)
 
 
