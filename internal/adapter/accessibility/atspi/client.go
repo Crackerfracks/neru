@@ -172,8 +172,16 @@ type Client struct {
 	// matched it, so findFrameByTitle scans the bus once per app rather than
 	// on every activation. A restarted app gets a new bus name, which the
 	// stale entry no longer matches.
+	//
+	// titleMissed records a title scan that found nothing, keyed by app_id and
+	// title, with a fingerprint of the applications on the bus at the time.
+	// An app with no accessibility tree (a terminal such as foot) never
+	// matches, and without this every hint activation in it would read every
+	// window on the bus. The scan runs again once the title or the set of
+	// applications changes.
 	titleMatchedMu sync.Mutex
 	titleMatched   map[string]string
+	titleMissed    map[string]uint64
 
 	activeMu     sync.Mutex
 	activeWindow *atspiActiveWindow // nil until the first window:activate arrives

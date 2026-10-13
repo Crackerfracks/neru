@@ -4,6 +4,7 @@ package atspi
 
 import (
 	"context"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
@@ -184,7 +185,8 @@ func (c *Client) findActiveFrame(
 			}
 		}
 
-		if len(matches) == 0 && haveFocusedTitle {
+		if len(matches) == 0 && haveFocusedTitle &&
+			!c.titleScanMissed(focusedAppID, focusedTitle, apps) {
 			frame, scanned, ok := c.findFrameByTitle(ctx, conn, apps, names, focusedTitle)
 			if ok {
 				c.rememberTitleMatch(focusedAppID, frame.Name)
@@ -192,6 +194,8 @@ func (c *Client) findActiveFrame(
 
 				return frame, true
 			}
+
+			c.rememberTitleMiss(focusedAppID, focusedTitle, apps)
 		}
 
 		switch {
@@ -305,6 +309,42 @@ func (c *Client) rememberTitleMatch(focusedAppID, busName string) {
 	}
 
 	c.titleMatched[focusedAppID] = busName
+}
+
+// rememberTitleMiss records that no window on the bus had focusedTitle while
+// apps were the applications on it.
+func (c *Client) rememberTitleMiss(focusedAppID, focusedTitle string, apps []accRef) {
+	c.titleMatchedMu.Lock()
+	defer c.titleMatchedMu.Unlock()
+
+	if c.titleMissed == nil || len(c.titleMissed) >= maxTitleMatches {
+		c.titleMissed = make(map[string]uint64)
+	}
+
+	c.titleMissed[focusedAppID+"\x00"+focusedTitle] = busFingerprint(apps)
+}
+
+// titleScanMissed reports whether a title scan for this app_id and title
+// already found nothing among the same applications.
+func (c *Client) titleScanMissed(focusedAppID, focusedTitle string, apps []accRef) bool {
+	c.titleMatchedMu.Lock()
+	defer c.titleMatchedMu.Unlock()
+
+	fingerprint, ok := c.titleMissed[focusedAppID+"\x00"+focusedTitle]
+
+	return ok && fingerprint == busFingerprint(apps)
+}
+
+// busFingerprint hashes the bus names of apps, which change whenever an
+// application starts or exits.
+func busFingerprint(apps []accRef) uint64 {
+	hash := fnv.New64a()
+	for _, app := range apps {
+		_, _ = hash.Write([]byte(app.Name))
+		_, _ = hash.Write([]byte{0})
+	}
+
+	return hash.Sum64()
 }
 
 // appAnswersTo reports whether the AT-SPI application called name, on bus
