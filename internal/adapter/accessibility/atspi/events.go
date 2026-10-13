@@ -216,7 +216,7 @@ func (c *Client) activeWindowMatching(focusedAppID, focusedTitle string) (accRef
 
 	// The cached window must belong to the application the compositor currently
 	// reports as focused.
-	if !c.appAnswersTo(active.appName, active.frame.Name, focusedAppID) {
+	if !appMatchesFocusedID(active.appName, focusedAppID) {
 		return accRef{}, false
 	}
 

@@ -266,29 +266,99 @@ func TestClient_FindFrameByTitle_PicksTheOneWindowWithTheFocusedTitle(t *testing
 	twinB, _ := window("twin_b", "Untitled", atspiStateShowing)
 
 	apps := []accRef{editor.ref, files.ref, hidden.ref, twinA.ref, twinB.ref}
-	names := []string{"gnome-text-editor", "org.gnome.Nautilus", "hidden", "twin_a", "twin_b"}
+	names := []string{textEditorName, "org.gnome.Nautilus", "hidden", "twin_a", "twin_b"}
+
+	// An application that has left the bus fails every read, which must not
+	// count as a window without the title.
+	gone := accRef{Name: ":1.9999", Path: "/gone"}
 
 	tests := []struct {
-		title  string
-		want   accRef
-		wantOK bool
+		name      string
+		title     string
+		apps      []accRef
+		want      accRef
+		wantFound bool
+		wantNone  bool
 	}{
-		{"Notes - Text Editor", editorFrame.ref, true},
-		{"Untitled", accRef{}, false},
-		{"Draft", accRef{}, false},
-		{"Nothing has this title", accRef{}, false},
+		{"one window has the title", "Notes - Text Editor", apps, editorFrame.ref, true, false},
+		{"two windows share the title", "Untitled", apps, accRef{}, false, false},
+		{"the window with the title is not showing", "Draft", apps, accRef{}, false, true},
+		{"no window has the title", "Nothing has this title", apps, accRef{}, false, true},
+		{
+			"a read failed",
+			"Nothing has this title",
+			append(slices.Clone(apps), gone),
+			accRef{},
+			false,
+			false,
+		},
 	}
 
 	for _, test := range tests {
-		t.Run(test.title, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
+			appNames := make([]string, len(test.apps))
+			copy(appNames, names)
+
 			client := New(zap.NewNop(), nil)
 
-			got, _, ok := client.findFrameByTitle(t.Context(), scanner, apps, names, test.title)
-			if got != test.want || ok != test.wantOK {
-				t.Errorf("findFrameByTitle(%q) = %v, %v, want %v, %v",
-					test.title, got, ok, test.want, test.wantOK)
+			got, _, found, none := client.findFrameByTitle(
+				t.Context(), scanner, test.apps, appNames, test.title)
+			if got != test.want || found != test.wantFound || none != test.wantNone {
+				t.Errorf("findFrameByTitle(%q) = %v, found %v, none %v, want %v, %v, %v",
+					test.title, got, found, none, test.want, test.wantFound, test.wantNone)
 			}
 		})
+	}
+}
+
+func TestClient_FindFocusedFrameByTitle_ChecksTheTitleInTheRememberedApp(t *testing.T) {
+	address := startPrivateBus(t)
+
+	first := connectBus(t, address)
+	second := connectBus(t, address)
+	scanner := connectBus(t, address)
+
+	// Two instances of one app, each on its own bus connection with one
+	// window.
+	instance := func(conn *dbus.Conn, title string) (accRef, accRef) {
+		frame := fixtureChild(conn.Names()[0])("frame", "frame", atspiStateShowing)
+		frame.name = title
+
+		application := fixtureChild(conn.Names()[0])("app", "application")
+		application.children = []*fakeAccessible{frame}
+
+		exportFixture(t, conn, application)
+
+		return application.ref, frame.ref
+	}
+
+	firstApp, firstFrame := instance(first, "Notes")
+	secondApp, secondFrame := instance(second, "Draft")
+
+	apps := []accRef{firstApp, secondApp}
+	names := []string{textEditorName, textEditorName}
+
+	const appID = "org.gnome.TextEditor"
+
+	client := New(zap.NewNop(), nil)
+	client.rememberTitleMatch(appID, firstApp.Name)
+
+	tests := []struct {
+		title    string
+		want     accRef
+		wantPath string
+	}{
+		{"Notes", firstFrame, "focused-title-remembered"},
+		{"Draft", secondFrame, "focused-title-only"},
+	}
+
+	for _, test := range tests {
+		got, path, _, ok := client.findFocusedFrameByTitle(
+			t.Context(), scanner, apps, names, appID, test.title)
+		if !ok || got != test.want || path != test.wantPath {
+			t.Errorf("findFocusedFrameByTitle(%q) = %v via %q, ok %v, want %v via %q",
+				test.title, got, path, ok, test.want, test.wantPath)
+		}
 	}
 }
 
@@ -583,6 +653,9 @@ func TestClient_Scan_ReadsNoDeeperThanMaxDepth(t *testing.T) {
 		})
 	}
 }
+
+// textEditorName is the AT-SPI application name GNOME Text Editor reports.
+const textEditorName = "gnome-text-editor"
 
 // exportFixture exports frame and every element under it on app under the
 // interfaces a scan calls.

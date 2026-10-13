@@ -5,6 +5,7 @@ package atspi
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -48,38 +49,6 @@ func TestAppMatchesFocusedID(t *testing.T) {
 	}
 }
 
-func TestClient_AppAnswersTo_RemembersATitleMatchByBusName(t *testing.T) {
-	client := New(zap.NewNop(), nil)
-
-	const appID, busName = "org.gnome.TextEditor", ":1.42"
-
-	if client.appAnswersTo("gnome-text-editor", busName, appID) {
-		t.Fatal("answered by name before any title match")
-	}
-
-	client.rememberTitleMatch(appID, busName)
-
-	tests := []struct {
-		name    string
-		busName string
-		appID   string
-		want    bool
-	}{
-		{"the app the title matched", busName, appID, true},
-		{"the same app restarted on a new connection", ":1.77", appID, false},
-		{"another focused app", busName, "org.gnome.Calculator", false},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := client.appAnswersTo("gnome-text-editor", test.busName, test.appID)
-			if got != test.want {
-				t.Errorf("appAnswersTo() = %v, want %v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestClient_TitleScanMissed_SkipsOnlyWhileNothingChanged(t *testing.T) {
 	client := New(zap.NewNop(), nil)
 
@@ -99,6 +68,17 @@ func TestClient_TitleScanMissed_SkipsOnlyWhileNothingChanged(t *testing.T) {
 		{"the same title among the same apps", title, apps, true},
 		{"a new title", "~/src/neru", apps, false},
 		{"an app started since", title, withNewApp, false},
+	}
+
+	expired := New(zap.NewNop(), nil)
+	expired.rememberTitleMiss(appID, title, apps)
+	expired.titleMissed[appID+"\x00"+title] = titleMiss{
+		apps: busFingerprint(apps),
+		at:   time.Now().Add(-titleMissTTL),
+	}
+
+	if expired.titleScanMissed(appID, title, apps) {
+		t.Error("a miss older than titleMissTTL still skipped the scan")
 	}
 
 	for _, test := range tests {
