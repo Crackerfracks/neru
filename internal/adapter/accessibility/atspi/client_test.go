@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 
+	"go.uber.org/zap"
+
 	"github.com/y3owk1n/neru/internal/domain/element"
 )
 
@@ -41,6 +43,38 @@ func TestAppMatchesFocusedID(t *testing.T) {
 			if got := appMatchesFocusedID(tc.atspiName, tc.appID); got != tc.want {
 				t.Errorf("appMatchesFocusedID(%q, %q) = %v, want %v",
 					tc.atspiName, tc.appID, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClient_AppAnswersTo_RemembersATitleMatchByBusName(t *testing.T) {
+	client := New(zap.NewNop(), nil)
+
+	const appID, busName = "org.gnome.TextEditor", ":1.42"
+
+	if client.appAnswersTo("gnome-text-editor", busName, appID) {
+		t.Fatal("answered by name before any title match")
+	}
+
+	client.rememberTitleMatch(appID, busName)
+
+	tests := []struct {
+		name    string
+		busName string
+		appID   string
+		want    bool
+	}{
+		{"the app the title matched", busName, appID, true},
+		{"the same app restarted on a new connection", ":1.77", appID, false},
+		{"another focused app", busName, "org.gnome.Calculator", false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := client.appAnswersTo("gnome-text-editor", test.busName, test.appID)
+			if got != test.want {
+				t.Errorf("appAnswersTo() = %v, want %v", got, test.want)
 			}
 		})
 	}

@@ -127,7 +127,7 @@ func (c *Client) findActiveFrame(
 	// when the focused app cannot be uniquely resolved (handled by the full scan
 	// below).
 	if haveFocused {
-		matches := c.findFocusedApps(ctx, conn, apps, focusedAppID)
+		matches, names := c.findFocusedApps(ctx, conn, apps, focusedAppID)
 
 		c.logger.Debug("AT-SPI focused app probe",
 			zap.Int("apps", len(apps)),
@@ -181,6 +181,16 @@ func (c *Client) findActiveFrame(
 
 					return frame, true
 				}
+			}
+		}
+
+		if len(matches) == 0 && haveFocusedTitle {
+			frame, scanned, ok := c.findFrameByTitle(ctx, conn, apps, names, focusedTitle)
+			if ok {
+				c.rememberTitleMatch(focusedAppID, frame.Name)
+				c.logFrameSelection(start, "focused-title-only", len(apps), scanned)
+
+				return frame, true
 			}
 		}
 
@@ -241,6 +251,76 @@ func (c *Client) findActiveFrame(
 	c.logFrameSelection(start, "full-scan", len(apps), scanned)
 
 	return frame, ok
+}
+
+// findFrameByTitle returns the one showing frame on the bus whose title is the
+// focused window's, for a focused app_id that no AT-SPI application name
+// answers to, and how many frames it read. GNOME apps name themselves after
+// their binary ("gnome-text-editor") where their app_id is reverse-DNS
+// ("org.gnome.TextEditor"), so the name probe misses them. A title that more
+// than one frame shares identifies no window, so it returns none. names are
+// the application names the probe already read, one per app.
+//
+// It reads every application's frames, which on a desktop with many apps open
+// is the cost the remembered match (rememberTitleMatch) pays once per app.
+func (c *Client) findFrameByTitle(
+	ctx context.Context,
+	conn *dbus.Conn,
+	apps []accRef,
+	names []string,
+	focusedTitle string,
+) (accRef, int, bool) {
+	metas := make([]appMeta, len(apps))
+	for index, name := range names {
+		metas[index] = appMeta{
+			skip: isVirtualKeyboardApp(name) || isNonTargetSurfaceApp(name) ||
+				isDesktopShellApp(name),
+			matchesFocused: true,
+		}
+	}
+
+	scans, scanned := c.scanApps(ctx, conn, apps, metas, true, focusedTitle, true)
+
+	cand := mergeFrameScan(scans)
+	if cand.focusedTitleCount != 1 {
+		return accRef{}, scanned, false
+	}
+
+	return cand.focusedTitleFrame, scanned, true
+}
+
+// maxTitleMatches bounds the remembered title matches. Each is two short
+// strings, and a session rarely runs more distinct apps than this, so the map
+// starts over rather than tracking which entry is oldest.
+const maxTitleMatches = 64
+
+// rememberTitleMatch records that busName's window answered to focusedAppID by
+// title, so the next activation finds it by name probe.
+func (c *Client) rememberTitleMatch(focusedAppID, busName string) {
+	c.titleMatchedMu.Lock()
+	defer c.titleMatchedMu.Unlock()
+
+	if c.titleMatched == nil || len(c.titleMatched) >= maxTitleMatches {
+		c.titleMatched = make(map[string]string)
+	}
+
+	c.titleMatched[focusedAppID] = busName
+}
+
+// appAnswersTo reports whether the AT-SPI application called name, on bus
+// connection busName, is the compositor's focused app: by name, or by an
+// earlier title match.
+func (c *Client) appAnswersTo(name, busName, focusedAppID string) bool {
+	if appMatchesFocusedID(name, focusedAppID) {
+		return true
+	}
+
+	c.titleMatchedMu.Lock()
+	defer c.titleMatchedMu.Unlock()
+
+	matched, ok := c.titleMatched[focusedAppID]
+
+	return ok && matched == busName
 }
 
 // appMeta classifies one AT-SPI application for frame selection: whether it is
@@ -307,13 +387,16 @@ func (c *Client) appNames(ctx context.Context, conn *dbus.Conn, apps []accRef) [
 // otherwise pay ~atspiCallTimeout waiting on the same unresponsive app. Virtual
 // keyboards, non-target surfaces, and the desktop shell are never focus matches
 // and are excluded. A no-match probe still waits for every app (there is nothing
-// to short-circuit on), but that path yields no frame anyway.
+// to short-circuit on), and returns every name it read, which the title
+// fallback reuses rather than reading them again.
 func (c *Client) findFocusedApps(
 	ctx context.Context,
 	conn *dbus.Conn,
 	apps []accRef,
 	focusedAppID string,
-) []int {
+) ([]int, []string) {
+	names := make([]string, len(apps))
+
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -342,6 +425,8 @@ func (c *Client) findFocusedApps(
 				}
 
 				name := c.name(probeCtx, conn, app)
+				names[index] = name
+
 				if name == "" ||
 					isVirtualKeyboardApp(name) ||
 					isNonTargetSurfaceApp(name) ||
@@ -349,7 +434,7 @@ func (c *Client) findFocusedApps(
 					return
 				}
 
-				if appMatchesFocusedID(name, focusedAppID) {
+				if c.appAnswersTo(name, app.Name, focusedAppID) {
 					select {
 					case matchCh <- index:
 					case <-probeCtx.Done():
@@ -374,7 +459,7 @@ func (c *Client) findFocusedApps(
 	// two distinct apps sharing one app_id with no title to disambiguate them.
 	first, ok := <-matchCh
 	if !ok {
-		return matches
+		return matches, names
 	}
 
 	matches = append(matches, first)
@@ -399,7 +484,7 @@ func (c *Client) findFocusedApps(
 	// canceled probes return.
 	cancel()
 
-	return matches
+	return matches, nil
 }
 
 // scanApps reads the frames of the selected applications concurrently, returning

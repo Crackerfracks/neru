@@ -167,6 +167,14 @@ type Client struct {
 	// window that most recently emitted a window:activate event, so frame
 	// selection can skip the registry scan entirely when the cached window still
 	// matches the compositor's focused toplevel. See events.go.
+	// titleMatched maps a focused app_id that no AT-SPI application name
+	// answers to onto the bus name of the application whose window title
+	// matched it, so findFrameByTitle scans the bus once per app rather than
+	// on every activation. A restarted app gets a new bus name, which the
+	// stale entry no longer matches.
+	titleMatchedMu sync.Mutex
+	titleMatched   map[string]string
+
 	activeMu     sync.Mutex
 	activeWindow *atspiActiveWindow // nil until the first window:activate arrives
 	eventsReady  bool               // true once the listener is registered on c.a11y

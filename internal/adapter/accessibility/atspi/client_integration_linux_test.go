@@ -228,6 +228,61 @@ func TestClient_ScanPaths_ReadNameDescriptionAndValue(t *testing.T) {
 	}
 }
 
+func TestClient_FindFrameByTitle_PicksTheOneWindowWithTheFocusedTitle(t *testing.T) {
+	address := startPrivateBus(t)
+
+	app := connectBus(t, address)
+	scanner := connectBus(t, address)
+
+	child := fixtureChild(app.Names()[0])
+
+	// window returns an application holding one frame titled title, so the
+	// frame's AT-SPI name is the window title as GTK sets it.
+	window := func(path, title string, states ...uint) (*fakeAccessible, *fakeAccessible) {
+		frame := child(path+"_frame", "frame", states...)
+		frame.name = title
+
+		application := child(path, "application")
+		application.children = []*fakeAccessible{frame}
+
+		exportFixture(t, app, application)
+
+		return application, frame
+	}
+
+	editor, editorFrame := window("editor", "Notes - Text Editor", atspiStateShowing)
+	files, _ := window("files", "Home", atspiStateShowing)
+	hidden, _ := window("hidden", "Draft", atspiStateActive)
+	twinA, _ := window("twin_a", "Untitled", atspiStateShowing)
+	twinB, _ := window("twin_b", "Untitled", atspiStateShowing)
+
+	apps := []accRef{editor.ref, files.ref, hidden.ref, twinA.ref, twinB.ref}
+	names := []string{"gnome-text-editor", "org.gnome.Nautilus", "hidden", "twin_a", "twin_b"}
+
+	tests := []struct {
+		title  string
+		want   accRef
+		wantOK bool
+	}{
+		{"Notes - Text Editor", editorFrame.ref, true},
+		{"Untitled", accRef{}, false},
+		{"Draft", accRef{}, false},
+		{"Nothing has this title", accRef{}, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.title, func(t *testing.T) {
+			client := New(zap.NewNop(), nil)
+
+			got, _, ok := client.findFrameByTitle(t.Context(), scanner, apps, names, test.title)
+			if got != test.want || ok != test.wantOK {
+				t.Errorf("findFrameByTitle(%q) = %v, %v, want %v, %v",
+					test.title, got, ok, test.want, test.wantOK)
+			}
+		})
+	}
+}
+
 // hasStates reports whether states has every bit set in want.
 func hasStates(states []uint32, want []int32) bool {
 	for word, bits := range want {
