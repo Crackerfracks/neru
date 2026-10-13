@@ -5,8 +5,10 @@ package windows
 import (
 	"context"
 	"image"
+	"maps"
 	"runtime"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 	"unsafe"
@@ -36,16 +38,24 @@ var (
 	modkernel32              = windows.NewLazySystemDLL("kernel32.dll")
 	procFixtureCreateWindowW = moduser32.NewProc("CreateWindowExW")
 	procFixtureDestroyWindow = moduser32.NewProc("DestroyWindow")
+	procFixtureSetWindowLong = moduser32.NewProc("SetWindowLongPtrW")
+	procFixtureSetForeground = moduser32.NewProc("SetForegroundWindow")
+	procFixtureGetForeground = moduser32.NewProc("GetForegroundWindow")
+	procFixtureSetFocus      = moduser32.NewProc("SetFocus")
 	procFixtureModuleHandleW = modkernel32.NewProc("GetModuleHandleW")
 )
 
 const (
-	fixturePopup       = 0x80000000
-	fixtureVisible     = 0x10000000
-	fixtureChild       = 0x40000000
-	fixtureCheckBox    = 0x2
-	fixtureDisabled    = 0x08000000
-	fixturePassword    = 0x20
+	fixturePopup    = 0x80000000
+	fixtureVisible  = 0x10000000
+	fixtureChild    = 0x40000000
+	fixtureCheckBox = 0x2
+	fixtureDisabled = 0x08000000
+	fixturePassword = 0x20
+	// fixtureControlID is a control id the Win32 UIA proxy reports as the
+	// control's AutomationId, and gwlpID is the window slot that holds it.
+	fixtureControlID   = 4242
+	gwlpID             = ^uintptr(11) // GWLP_ID, -12
 	fixtureWindowSize  = 320
 	fixtureControlSize = 40
 
@@ -170,7 +180,7 @@ func TestBuildTree_ReportsControlsNestedBelowTheWindow(t *testing.T) {
 	t.Logf("built tree with %d hints in %v", len(hints), time.Since(started))
 }
 
-func TestBuildTree_ReportsEditValueAndDisabledStateButNoPassword(t *testing.T) {
+func TestBuildTree_ReportsTextIdentifierAndFocusButNoDisabledOrPassword(t *testing.T) {
 	runtime.LockOSThread()
 
 	defer runtime.UnlockOSThread()
@@ -181,38 +191,49 @@ func TestBuildTree_ReportsEditValueAndDisabledStateButNoPassword(t *testing.T) {
 		fixturePopup|fixtureVisible,
 		image.Pt(0, 0), fixtureWindowSize, fixtureWindowSize, 0)
 
-	createFixtureWindow(t, "EDIT", "neru-fixture-edit-text", child,
+	edit := createFixtureWindow(t, "EDIT", "neru-fixture-edit-text", child,
 		image.Pt(10, 10), fixtureControlSize*3, fixtureControlSize, window)
-	createFixtureWindow(t, "BUTTON", "neru-fixture-enabled", child,
+	enabled := createFixtureWindow(t, "BUTTON", "neru-fixture-enabled", child,
 		image.Pt(10, 60), fixtureControlSize*3, fixtureControlSize, window)
 	createFixtureWindow(t, "BUTTON", "neru-fixture-disabled", child|fixtureDisabled,
 		image.Pt(10, 110), fixtureControlSize*3, fixtureControlSize, window)
 	createFixtureWindow(t, "EDIT", "neru-fixture-password", child|fixturePassword,
 		image.Pt(10, 160), fixtureControlSize*3, fixtureControlSize, window)
 
-	opts := DefaultTreeOptions(zap.NewNop())
-	opts.SetRoles(map[string]struct{}{uiaControlButton: {}, uiaControlEdit: {}})
+	discardCall(procFixtureSetWindowLong.Call(enabled, gwlpID, fixtureControlID))
 
-	ctx, cancel := context.WithTimeout(context.Background(), fixtureDeadline)
-	defer cancel()
+	// UI Automation reports keyboard focus only inside the foreground window,
+	// which a runner may refuse to hand over, so focus is expected only when
+	// the window got it.
+	discardCall(procFixtureSetForeground.Call(window))
+	discardCall(procFixtureSetFocus.Call(edit))
 
-	tree, err := BuildTree(ctx, &Element{hwnd: window}, opts)
-	if err != nil {
-		t.Fatalf("BuildTree failed: %v", err)
+	foreground, _, _ := procFixtureGetForeground.Call()
+	if foreground != window {
+		t.Log("the fixture window could not take the foreground, so focus is not checked")
+	}
+
+	scan := func(readState bool) []*TreeNode {
+		opts := DefaultTreeOptions(zap.NewNop())
+		opts.SetRoles(map[string]struct{}{uiaControlButton: {}, uiaControlEdit: {}})
+		opts.SetReadState(readState)
+
+		ctx, cancel := context.WithTimeout(context.Background(), fixtureDeadline)
+		defer cancel()
+
+		tree, err := BuildTree(ctx, &Element{hwnd: window}, opts)
+		if err != nil {
+			t.Fatalf("BuildTree failed: %v", err)
+		}
+
+		return ProcessClickableNodes(tree, config.HintsConfig{})
 	}
 
 	var editValues []string
 
-	enabled := map[string]bool{}
-
-	for _, hint := range ProcessClickableNodes(tree, config.HintsConfig{}) {
-		info := hint.Info()
-
-		switch info.Role() {
-		case uiaControlEdit:
-			editValues = append(editValues, info.Value())
-		case uiaControlButton:
-			enabled[info.Title()] = info.IsEnabled()
+	for _, hint := range scan(false) {
+		if hint.Info().Role() == uiaControlEdit {
+			editValues = append(editValues, hint.Info().Value())
 		}
 	}
 
@@ -226,11 +247,38 @@ func TestBuildTree_ReportsEditValueAndDisabledStateButNoPassword(t *testing.T) {
 			editValues)
 	}
 
-	if state, ok := enabled["neru-fixture-enabled"]; !ok || !state {
-		t.Errorf("enabled button: reported %v, enabled %v, want reported and enabled", ok, state)
-	}
+	for _, readState := range []bool{true, false} {
+		buttons := map[string]string{}
+		editFocused := false
 
-	if state, ok := enabled["neru-fixture-disabled"]; !ok || state {
-		t.Errorf("disabled button: reported %v, enabled %v, want reported and disabled", ok, state)
+		for _, hint := range scan(readState) {
+			info := hint.Info()
+
+			switch {
+			case info.Role() == uiaControlButton:
+				buttons[info.Title()] = info.Identifier()
+			case info.Value() == "neru-fixture-edit-text":
+				editFocused = info.IsFocused()
+			}
+		}
+
+		want := map[string]string{"neru-fixture-enabled": ""}
+		if readState {
+			want["neru-fixture-enabled"] = strconv.Itoa(fixtureControlID)
+		}
+
+		if !maps.Equal(buttons, want) {
+			t.Errorf(
+				"read state %v: buttons and identifiers = %v, want %v (the disabled one skipped)",
+				readState,
+				buttons,
+				want,
+			)
+		}
+
+		if wantFocused := readState && foreground == window; editFocused != wantFocused {
+			t.Errorf("read state %v: the focused edit reported focused %v, want %v",
+				readState, editFocused, wantFocused)
+		}
 	}
 }
