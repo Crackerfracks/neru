@@ -228,6 +228,8 @@ func (h *handlerState) startHintSearch() error {
 	h.hints.Context.SetSearchQuery("")
 	h.hints.Context.SetSearchActive(true)
 
+	session := h.hintSearchSession
+
 	if h.hints.Context.HideOnEmptySearch() {
 		// When hide-on-empty-search is active, hide all hints initially.
 		// Hints will appear as the user types a query.
@@ -278,6 +280,7 @@ func (h *handlerState) startHintSearch() error {
 		Y:      bounds.Min.Y,
 		Width:  bounds.Dx(),
 		Height: bounds.Dy(),
+		Screen: h.screenBounds,
 	}
 
 	started, _ := h.textInput.StartHintSearchSession(
@@ -287,8 +290,8 @@ func (h *handlerState) startHintSearch() error {
 				h.outer.mu.Lock()
 				defer h.outer.mu.Unlock()
 
-				if h.appState.CurrentMode() != domain.ModeHints || h.hints == nil ||
-					h.hints.Context == nil {
+				if h.hintSearchSession != session || h.appState.CurrentMode() != domain.ModeHints ||
+					h.hints == nil || h.hints.Context == nil {
 					return
 				}
 
@@ -303,7 +306,7 @@ func (h *handlerState) startHintSearch() error {
 				h.outer.mu.Lock()
 				defer h.outer.mu.Unlock()
 
-				if h.appState.CurrentMode() != domain.ModeHints {
+				if h.hintSearchSession != session || h.appState.CurrentMode() != domain.ModeHints {
 					return
 				}
 
@@ -313,7 +316,7 @@ func (h *handlerState) startHintSearch() error {
 				h.outer.mu.Lock()
 				defer h.outer.mu.Unlock()
 
-				if h.appState.CurrentMode() != domain.ModeHints {
+				if h.hintSearchSession != session || h.appState.CurrentMode() != domain.ModeHints {
 					return
 				}
 
@@ -323,13 +326,19 @@ func (h *handlerState) startHintSearch() error {
 		textInputFrame,
 	)
 
-	if started {
-		h.hintSearchTextInputActive = true
+	if !started {
+		// A session this one replaced left the tap off for it, and no field
+		// took its place, so the key stream is all that is left.
+		h.stopHintSearchTextInput(false)
 
-		if h.hasEventTap() {
-			h.disableEventTap()
-			h.hintSearchEventTapDisabled = true
-		}
+		return nil
+	}
+
+	h.hintSearchTextInputActive = true
+
+	if h.hasEventTap() {
+		h.disableEventTap()
+		h.hintSearchEventTapDisabled = true
 	}
 
 	return nil
@@ -345,6 +354,8 @@ func (h *handlerState) stopHintSearchTextInput(keepEventTapDisabled bool) {
 		}
 	}
 
+	// Callbacks the stopped session already queued see a new count and stop.
+	h.hintSearchSession++
 	h.hintSearchTextInputActive = false
 
 	if h.hintSearchEventTapDisabled && h.hasEventTap() &&

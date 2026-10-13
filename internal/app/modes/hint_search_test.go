@@ -69,7 +69,10 @@ func newHintSearchTestHandler(
 func TestStartHintSearch_PlacesTheTextInputOverTheDrawnBox(t *testing.T) {
 	t.Parallel()
 
+	// The box is relative to the active screen, here a second monitor, and
+	// the frame carries that screen so a platform field can place itself.
 	box := image.Rect(410, 740, 610, 780)
+	screen := image.Rect(1920, 0, 3840, 1080)
 	overlayPort := &portmocks.MockOverlayPort{
 		HintSearchBoundsFunc: func(image.Rectangle) image.Rectangle { return box },
 	}
@@ -78,6 +81,7 @@ func TestStartHintSearch_PlacesTheTextInputOverTheDrawnBox(t *testing.T) {
 	handler := newHintSearchTestHandler(t, overlayPort, textInput)
 
 	handler.mu.Lock()
+	handler.screenBounds = screen
 	err := handler.startHintSearch()
 	handler.mu.Unlock()
 
@@ -89,7 +93,9 @@ func TestStartHintSearch_PlacesTheTextInputOverTheDrawnBox(t *testing.T) {
 		t.Fatalf("text input started %d times, want 1", textInput.StartCount())
 	}
 
-	want := ports.TextInputFrame{X: box.Min.X, Y: box.Min.Y, Width: box.Dx(), Height: box.Dy()}
+	want := ports.TextInputFrame{
+		X: box.Min.X, Y: box.Min.Y, Width: box.Dx(), Height: box.Dy(), Screen: screen,
+	}
 	if got := textInput.Frame(); got != want {
 		t.Errorf("text input frame = %+v, want %+v", got, want)
 	}
@@ -239,6 +245,57 @@ func TestHintsModeRefreshForThemeChange_RedrawsAnOpenSearchBox(t *testing.T) {
 	}
 }
 
+// TestStartHintSearch_IgnoresCallbacksFromAStoppedSession pins the session
+// token. A platform field can queue a callback just before it stops, and that
+// callback runs once the handler lock is free, possibly after a new search
+// started. A stale cancel must not close the new search, and a stale query
+// must not replace its text.
+func TestStartHintSearch_IgnoresCallbacksFromAStoppedSession(t *testing.T) {
+	t.Parallel()
+
+	overlayPort := &portmocks.MockOverlayPort{
+		HintSearchBoundsFunc: func(image.Rectangle) image.Rectangle {
+			return image.Rect(0, 0, 200, 30)
+		},
+	}
+	textInput := &portmocks.MockTextInputPort{Started: true}
+
+	handler := newHintSearchTestHandler(t, overlayPort, textInput)
+
+	handler.mu.Lock()
+	err := handler.startHintSearch()
+	handler.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("first startHintSearch() error = %v", err)
+	}
+
+	stale := textInput.Callbacks()
+
+	handler.mu.Lock()
+	err = handler.startHintSearch()
+	handler.hints.Context.SetSearchQuery("new")
+	handler.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("second startHintSearch() error = %v", err)
+	}
+
+	stale.OnQueryChanged("old")
+	stale.OnCancel()
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+
+	if !handler.hints.Context.SearchActive() {
+		t.Error("a callback from the stopped session closed the new search")
+	}
+
+	if got := handler.hints.Context.SearchQuery(); got != "new" {
+		t.Errorf("query = %q, want %q", got, "new")
+	}
+}
+
 // TestHandleSearchInputKey_KeepsShiftedLettersAndSpaces pins the query text
 // itself, which matching cannot: search ignores case, so a capital typed as
 // "Shift+c" and kept as "c" would still find the same elements. The Linux and
@@ -267,5 +324,55 @@ func TestHandleSearchInputKey_KeepsShiftedLettersAndSpaces(t *testing.T) {
 	// The shifted symbol depends on the layout, so it stays dropped.
 	if got := handler.hints.Context.SearchQuery(); got != "Ca B" {
 		t.Errorf("query = %q, want %q", got, "Ca B")
+	}
+}
+
+// TestStartHintSearch_ReplacementThatFailsGivesTheKeyboardBack is the same
+// promise for a restarted search. The live session is stopped with the tap
+// left off for its replacement, and when the replacement field does not
+// start, the tap has to come back on.
+func TestStartHintSearch_ReplacementThatFailsGivesTheKeyboardBack(t *testing.T) {
+	t.Parallel()
+
+	enables := 0
+	eventTap := &portmocks.MockEventTapPort{
+		EnableFunc: func(context.Context) error {
+			enables++
+
+			return nil
+		},
+	}
+
+	overlayPort := &portmocks.MockOverlayPort{
+		HintSearchBoundsFunc: func(image.Rectangle) image.Rectangle {
+			return image.Rect(0, 0, 200, 30)
+		},
+	}
+
+	handler := newHintSearchTestHandler(
+		t,
+		overlayPort,
+		&portmocks.MockTextInputPort{Started: false},
+	)
+
+	handler.mu.Lock()
+	handler.eventTap = eventTap
+	handler.hintSearchTextInputActive = true
+	handler.hintSearchEventTapDisabled = true
+
+	err := handler.startHintSearch()
+	stillDisabled := handler.hintSearchEventTapDisabled
+	handler.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("startHintSearch() error = %v", err)
+	}
+
+	if enables != 1 {
+		t.Errorf("event tap enabled %d times, want 1: the keyboard is still switched off", enables)
+	}
+
+	if stillDisabled {
+		t.Error("the handler still believes it owes the event tap a re-enable")
 	}
 }
