@@ -72,7 +72,10 @@ The `identifier` that `neru query hints` reports is empty on Linux for GTK 3
 apps, which set no AT-SPI `AccessibleId`. GTK 4 apps report no screen positions,
 so Neru places their hints only where it can read the window's position. On
 X11, and on Wayland wherever Neru gets no window position, their hints stack
-at the top-left corner.
+at the top-left corner. `hints.visible_check_enabled` keeps every element in
+GTK 4 apps, which answer no hit-test. Elsewhere on Linux it drops only
+elements something else in the same window covers. The app answers the hit-test
+itself, so it never sees other windows, on X11 or Wayland.
 
 ² **OCR finds text only.** Linux (tesseract) and Windows (`Windows.Media.Ocr`)
 find words but not button shapes, so the `hints.vision.rectangle_*` options do
@@ -133,7 +136,6 @@ load, and `neru doctor` lists them under `platform_support`.
 | `general.hide_overlay_in_screen_share`, `hooks.on_screen_share_hide` | ✅ | ❌ | ❌ | hiding the overlay from a screen share is an NSWindow sharing level, a Quartz concept with no X11, Wayland or Win32 counterpart |
 | `hints.include_menubar_hints`, `hints.additional_menubar_hints_targets`, `hints.include_dock_hints`, `hints.include_nc_hints`, `hints.include_stage_manager_hints`, `hints.include_pip_hints`, `hints.include_screen_capture_hints` | ✅ | ❌ | ❌ | the menu bar, the Dock, Notification Center, Stage Manager, picture-in-picture and the screen-capture chrome are macOS surfaces with no counterpart |
 | `hints.detect_mission_control`, `hints.on_mission_control_activated`, `hints.on_mission_control_deactivated`, `hooks.on_mission_control_activated`, `hooks.on_mission_control_deactivated` | ✅ | ❌ | ❌ | Mission Control is a macOS concept, so the detection never fires and the hooks never run |
-| `hints.visible_check_enabled`, `hints.app_configs.visible_check_enabled`, `grid.app_configs.visible_check_enabled`, `recursive_grid.app_configs.visible_check_enabled`, `bisect.app_configs.visible_check_enabled`, `scroll.app_configs.visible_check_enabled`, `app_configs.visible_check_enabled` | ✅ | ❌ | ✅ | the visibility hit-test is an AX and UIA question; the AT-SPI walk never consults it |
 | `grid.prewarm_enabled` | ✅ | ❌ | ❌ | only the darwin grid overlay prewarms its layers; the other backends draw on demand |
 | `hints.vision.minimum_confidence`, `hints.vision.button_min_confidence`, `hints.vision.generic_clickable_min_confidence` | ✅ | ✅ | ❌ | Windows.Media.Ocr reports no per-word confidence, so every word scores one there and a floor keeps everything; the Vision framework and tesseract score each word |
 | `hints.vision.detect_rectangles`, `hints.vision.rectangle_max_candidates`, `hints.vision.rectangle_min_size`, `hints.vision.rectangle_min_aspect`, `hints.vision.rectangle_max_aspect` | ✅ | ❌ | ❌ | rectangle detection has no OCR answer, so it stays macOS-only even where the vision strategy lands; that half is text-only |
