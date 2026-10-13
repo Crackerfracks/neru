@@ -125,9 +125,10 @@ func (s *SystemAdapter) Capabilities() ports.PlatformCapabilities {
 		capabilities.AppWatcher = gnomeAppWatcherCapability()
 	}
 
-	// The hint-search field is a layer-shell surface built with cgo, so a
-	// session or build without either reads the search from the key stream.
-	if !nativeBackendsCompiledIn || s.backend == backendX11 || s.backend == backendWaylandGNOME ||
+	// The hint-search field needs cgo, and on Wayland a layer shell, which
+	// GNOME does not have. A build without cgo, GNOME and an unknown session
+	// read the search from the key stream.
+	if !nativeBackendsCompiledIn || s.backend == backendWaylandGNOME ||
 		s.backend == backendUnknown {
 		capabilities.TextInput = ports.FeatureCapability{
 			Status: ports.FeatureStatusStub,
