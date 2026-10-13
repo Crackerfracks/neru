@@ -1,4 +1,4 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package textinput
 
@@ -10,9 +10,8 @@ import (
 	"github.com/y3owk1n/neru/internal/ports"
 )
 
-// TextInput is the slot for platforms with no native hint-search field,
-// Windows among them. Hint search reads the event tap's key stream there
-// instead.
+// TextInput is the slot for platforms with no native hint-search field. Hint
+// search reads the event tap's key stream there instead.
 //
 // The started == false return — rather than a CodeNotSupported error — is the
 // contract here: TextInputPort.StartHintSearchSession is defined as

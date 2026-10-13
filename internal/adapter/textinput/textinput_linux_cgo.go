@@ -145,18 +145,15 @@ func (f *waylandField) query() string {
 }
 
 // fieldSession serves one open field. run owns the field and is the only
-// goroutine that touches it. Callbacks run in order on a second goroutine,
-// because the handler stops the session from inside them and stop waits for
-// run to return.
+// goroutine that touches it. Callbacks go through the queue, which runs them
+// on a goroutine of its own, because the handler stops the session from inside
+// them and stop waits for run to return.
 type fieldSession struct {
-	callbacks ports.TextInputCallbacks
-	logger    *zap.Logger
+	logger *zap.Logger
+	queue  *callbackQueue
 
 	stopRead, stopWrite int
-	stopping            chan struct{}
 	done                chan struct{}
-
-	mailbox fieldMailbox
 }
 
 func startFieldSession(
@@ -174,16 +171,13 @@ func startFieldSession(
 	}
 
 	session := &fieldSession{
-		callbacks: callbacks,
 		logger:    logger,
+		queue:     newCallbackQueue(callbacks),
 		stopRead:  pipe[0],
 		stopWrite: pipe[1],
-		stopping:  make(chan struct{}),
 		done:      make(chan struct{}),
-		mailbox:   fieldMailbox{wake: make(chan struct{}, 1)},
 	}
 
-	go session.deliver()
 	go session.run(field)
 
 	return session, nil
@@ -192,7 +186,7 @@ func startFieldSession(
 // stop closes the field. Callbacks not yet run are dropped from here on, and
 // the handler's session token covers one already waiting on its lock.
 func (s *fieldSession) stop() {
-	close(s.stopping)
+	s.queue.stop()
 
 	_, _ = unix.Write(s.stopWrite, []byte{0})
 	<-s.done
@@ -244,15 +238,15 @@ func (s *fieldSession) run(field nativeField) {
 		}
 
 		if flags&fieldChanged != 0 {
-			s.mailbox.post(fieldEvent{query: field.query(), changed: true})
+			s.queue.queryChanged(field.query())
 		}
 
 		if flags&fieldConfirm != 0 {
-			s.mailbox.post(fieldEvent{confirm: true})
+			s.queue.confirm()
 		}
 
 		if flags&fieldCancel != 0 {
-			s.mailbox.post(fieldEvent{cancel: true})
+			s.queue.cancel()
 		}
 	}
 }
@@ -263,79 +257,5 @@ var errLostConnection = errors.New("wayland connection failed")
 // turns the event tap back on, so the keyboard is never left with no reader.
 func (s *fieldSession) lost(err error) {
 	s.logger.Warn("Hint search field stopped, closing the search", zap.Error(err))
-	s.mailbox.post(fieldEvent{cancel: true})
-}
-
-func (s *fieldSession) deliver() {
-	for {
-		select {
-		case <-s.stopping:
-			return
-		case <-s.mailbox.wake:
-		}
-
-		for _, event := range s.mailbox.take() {
-			select {
-			case <-s.stopping:
-				return
-			default:
-			}
-
-			s.call(event)
-		}
-	}
-}
-
-func (s *fieldSession) call(event fieldEvent) {
-	switch {
-	case event.changed && s.callbacks.OnQueryChanged != nil:
-		s.callbacks.OnQueryChanged(event.query)
-	case event.confirm && s.callbacks.OnConfirm != nil:
-		s.callbacks.OnConfirm()
-	case event.cancel && s.callbacks.OnCancel != nil:
-		s.callbacks.OnCancel()
-	}
-}
-
-// fieldEvent is one callback to run.
-type fieldEvent struct {
-	query   string
-	changed bool
-	confirm bool
-	cancel  bool
-}
-
-// fieldMailbox holds events in order without bound or loss, except that a
-// query replaces a query right before it, since only the latest text matters.
-type fieldMailbox struct {
-	mu     sync.Mutex
-	events []fieldEvent
-	wake   chan struct{}
-}
-
-func (m *fieldMailbox) post(event fieldEvent) {
-	m.mu.Lock()
-
-	if last := len(m.events) - 1; event.changed && last >= 0 && m.events[last].changed {
-		m.events[last] = event
-	} else {
-		m.events = append(m.events, event)
-	}
-
-	m.mu.Unlock()
-
-	select {
-	case m.wake <- struct{}{}:
-	default:
-	}
-}
-
-func (m *fieldMailbox) take() []fieldEvent {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	events := m.events
-	m.events = nil
-
-	return events
+	s.queue.cancel()
 }

@@ -7,13 +7,6 @@ func supportedCapability(detail string) FeatureCapability {
 	}
 }
 
-func stubCapability(detail string) FeatureCapability {
-	return FeatureCapability{
-		Status: FeatureStatusStub,
-		Detail: detail,
-	}
-}
-
 // DarwinCapabilities returns the supported macOS runtime capabilities.
 func DarwinCapabilities() PlatformCapabilities {
 	return PlatformCapabilities{
@@ -206,9 +199,11 @@ func WindowsCapabilities() PlatformCapabilities {
 			"dark mode detection available via the Windows personalization registry " +
 				"(Themes\\Personalize AppsUseLightTheme)",
 		),
-		TextInput: stubCapability(
-			"native hint-search field not implemented yet; hint search falls back " +
-				"to the event tap's key stream",
+		TextInput: supportedCapability(
+			"native hint-search field via an EDIT control in a tool window, taking " +
+				"input-method text through IMM and dead keys through TranslateMessage; " +
+				"when Windows does not give it the foreground, hint search reads the " +
+				"event tap's key stream",
 		),
 		Vision: supportedCapability(
 			"vision element detection via Windows.Media.Ocr over a BitBlt screen " +
