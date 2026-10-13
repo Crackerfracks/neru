@@ -56,9 +56,11 @@ const (
 	// (one bit per state/role index).
 	atspiBitsPerWord = 32
 
-	// Walk bounds to keep D-Bus traffic sane on deep trees.
-	atspiMaxDepth = 40
-	atspiMaxNodes = 2000
+	// Walk bounds that keep D-Bus traffic down on large trees. hints.max_depth
+	// bounds the depth. When it is 0 (unlimited), atspiWalkDepthCeiling bounds
+	// it instead, so the walk ends in an app whose accessibility tree loops.
+	atspiMaxNodes         = 2000
+	atspiWalkDepthCeiling = 256
 
 	// atspiCallTimeout bounds a single AT-SPI D-Bus round-trip. A healthy
 	// toolkit answers each read (role, extents, name, children, state) in
@@ -142,8 +144,9 @@ type atspiExtents struct {
 type Client struct {
 	*native.Client
 
-	logger       *zap.Logger
-	windowOrigin windowOriginSource
+	logger         *zap.Logger
+	configProvider config.Provider
+	windowOrigin   windowOriginSource
 
 	// originFailure is the reason the window-origin source last gave for not
 	// answering, so a session-long failure is warned about once rather than on
@@ -184,9 +187,10 @@ func New(logger *zap.Logger, configProvider config.Provider) *Client {
 	}
 
 	return &Client{
-		Client:       native.New(logger, configProvider),
-		logger:       logger.Named("accessibility.atspi"),
-		windowOrigin: newWindowOriginSource(platform.DetectLinuxBackend(), logger),
+		Client:         native.New(logger, configProvider),
+		logger:         logger.Named("accessibility.atspi"),
+		configProvider: configProvider,
+		windowOrigin:   newWindowOriginSource(platform.DetectLinuxBackend(), logger),
 	}
 }
 
@@ -281,7 +285,7 @@ func (c *Client) ClickableNodes(
 	ctx context.Context,
 	root ax.Element,
 	roles []string,
-	_ int,
+	maxDepth int,
 	readState bool,
 ) ([]ax.Node, error) {
 	win, ok := root.(*atspiWindow)
@@ -369,34 +373,23 @@ func (c *Client) ClickableNodes(
 		return nil, nil
 	}
 
-	roleSet := rolesSet(roles)
-
-	// Fast path: a single Collection.GetMatches call instead of the per-node
-	// walk. Falls back to the walk when the toolkit doesn't implement Collection.
-	if nodes, ok := c.collectViaCollection(ctx, conn, win.ref, roleSet, offX, offY, readState); ok {
-		c.logger.Debug("AT-SPI clickable scan complete",
-			zap.String("path", "collection"),
-			zap.Int("count", len(nodes)),
-			zap.Int("offset_x", offX),
-			zap.Int("offset_y", offY),
-			zap.Bool("have_origin", haveOrigin),
-			zap.Duration("elapsed", time.Since(start)))
-
-		return nodes, nil
-	}
-
-	out := make([]ax.Node, 0, atspiClickableNodesCap)
-	visited := 0
-	c.walk(ctx, conn, win.ref, roleSet, 0, &out, &visited, offX, offY, readState)
+	depth := c.treeDepth(maxDepth)
+	out, path, visited := c.scan(ctx, conn, win.ref, rolesSet(roles), depth,
+		image.Pt(offX, offY), readState)
 
 	c.logger.Debug("AT-SPI clickable scan complete",
-		zap.String("path", "walk"),
+		zap.String("path", path),
 		zap.Int("count", len(out)),
 		zap.Int("visited", visited),
+		zap.Int("max_depth", depth),
 		zap.Int("offset_x", offX),
 		zap.Int("offset_y", offY),
 		zap.Bool("have_origin", haveOrigin),
 		zap.Duration("elapsed", time.Since(start)))
+
+	if path == scanPathCollection {
+		return out, nil
+	}
 
 	// An empty scan is normal for a window with nothing clickable, but if we got
 	// here because reads kept failing fatally — the app timed out, exited, or
@@ -483,6 +476,66 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 
 	return nil
+}
+
+// The two ways a scan reads the window, as the scan-complete log names them.
+const (
+	scanPathCollection = "collection"
+	scanPathWalk       = "walk"
+)
+
+// scan returns the nodes under root whose role is in roles, read no deeper
+// than depth (0 for unlimited), and which path read them. visited counts the
+// nodes the walk read, and is 0 on the Collection path.
+func (c *Client) scan(
+	ctx context.Context,
+	conn *dbus.Conn,
+	root accRef,
+	roles map[string]struct{},
+	depth int,
+	offset image.Point,
+	readState bool,
+) ([]ax.Node, string, int) {
+	// Fast path: a single Collection.GetMatches call instead of the per-node
+	// walk. Falls back to the walk when the toolkit doesn't implement Collection.
+	// Collection matches the whole subtree and cannot stop at a depth, so a
+	// limit below the default goes to the walk.
+	if depth == 0 || depth >= config.DefaultMaxDepth {
+		nodes, ok := c.collectViaCollection(ctx, conn, root, roles, offset.X, offset.Y, readState)
+		if ok {
+			return nodes, scanPathCollection, 0
+		}
+	}
+
+	limit := depth
+	if limit == 0 {
+		limit = atspiWalkDepthCeiling
+	}
+
+	out := make([]ax.Node, 0, atspiClickableNodesCap)
+	visited := 0
+	c.walk(ctx, conn, root, roles, 0, limit, &out, &visited, offset.X, offset.Y, readState)
+
+	return out, scanPathWalk, visited
+}
+
+// treeDepth returns the deepest level a scan reads, or 0 for unlimited. That
+// is maxDepth when the caller sets one, and hints.max_depth otherwise.
+func (c *Client) treeDepth(maxDepth int) int {
+	if maxDepth > 0 {
+		return maxDepth
+	}
+
+	if c.configProvider == nil {
+		return config.DefaultMaxDepth
+	}
+
+	cfg := c.configProvider.Get()
+	if cfg == nil {
+		return config.DefaultMaxDepth
+	}
+
+	return cfg.Hints.MaxDepth
 }
 
 // collectViaCollection fetches clickable elements with a single
@@ -946,13 +999,14 @@ func (c *Client) walk(
 	ref accRef,
 	roles map[string]struct{},
 	depth int,
+	maxDepth int,
 	out *[]ax.Node,
 	visited *int,
 	offX int,
 	offY int,
 	readState bool,
 ) {
-	if depth > atspiMaxDepth || len(*out) >= atspiMaxNodes {
+	if depth > maxDepth || len(*out) >= atspiMaxNodes {
 		return
 	}
 
@@ -981,6 +1035,6 @@ func (c *Client) walk(
 	}
 
 	for _, child := range c.children(ctx, conn, ref) {
-		c.walk(ctx, conn, child, roles, depth+1, out, visited, offX, offY, readState)
+		c.walk(ctx, conn, child, roles, depth+1, maxDepth, out, visited, offX, offY, readState)
 	}
 }
