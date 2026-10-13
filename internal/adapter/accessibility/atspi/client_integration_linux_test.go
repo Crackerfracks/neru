@@ -44,6 +44,10 @@ type fakeAccessible struct {
 	text            string
 	textReads       atomic.Int32
 	identifierReads atomic.Int32
+	// screenOrigin and windowOrigin are where the element sits in screen and
+	// in window coordinates.
+	screenOrigin image.Point
+	windowOrigin image.Point
 }
 
 func (f *fakeAccessible) GetRoleName() (string, *dbus.Error) { return f.role, nil }
@@ -86,8 +90,13 @@ func (f *fakeAccessible) GetText(int32, int32) (string, *dbus.Error) {
 	return f.text, nil
 }
 
-func (f *fakeAccessible) GetExtents(uint32) (atspiExtents, *dbus.Error) {
-	return atspiExtents{W: 10, H: 10}, nil
+func (f *fakeAccessible) GetExtents(coordType uint32) (atspiExtents, *dbus.Error) {
+	origin := f.screenOrigin
+	if coordType == atspiCoordWindow {
+		origin = f.windowOrigin
+	}
+
+	return atspiExtents{X: int32(origin.X), Y: int32(origin.Y), W: 10, H: 10}, nil
 }
 
 // GetMatches answers the Collection query as a toolkit does: the descendants
@@ -283,6 +292,135 @@ func TestClient_FindFrameByTitle_PicksTheOneWindowWithTheFocusedTitle(t *testing
 	}
 }
 
+func TestClient_Walk_HintsGTK4ElementsThatAreOnlySensitive(t *testing.T) {
+	address := startPrivateBus(t)
+
+	app := connectBus(t, address)
+	scanner := connectBus(t, address)
+
+	child := fixtureChild(app.Names()[0])
+
+	// GTK 4 marks an element that takes input SENSITIVE and never ENABLED.
+	frame := child("frame", "frame", atspiStateShowing)
+	frame.children = []*fakeAccessible{
+		child("sensitive", "button", atspiStateShowing, atspiStateSensitive),
+		child("insensitive", "button", atspiStateShowing),
+	}
+
+	exportFixture(t, app, frame)
+
+	var out []ax.Node
+
+	visited := 0
+	New(zap.NewNop(), nil).walk(t.Context(), scanner, frame.ref,
+		rolesSet(resolveLinuxRoles(t, "button")), 0, atspiWalkDepthCeiling, &out, &visited,
+		placement{}, false)
+
+	got := make([]string, 0, len(out))
+	for _, node := range out {
+		got = append(got, fixtureName(node))
+	}
+
+	if !slices.Equal(got, []string{"sensitive"}) {
+		t.Errorf("hinted %v, want [sensitive]", got)
+	}
+}
+
+// fixedOrigin is a window-origin source that always gives the same answer.
+type fixedOrigin struct {
+	origin image.Point
+	known  bool
+}
+
+func (fixedOrigin) start() {}
+
+func (f fixedOrigin) originFor(windowFrame) (image.Point, bool, error) {
+	return f.origin, f.known, nil
+}
+
+func TestClient_PlacementFor_PutsHintsOnTheScreen(t *testing.T) {
+	address := startPrivateBus(t)
+
+	app := connectBus(t, address)
+	scanner := connectBus(t, address)
+
+	child := fixtureChild(app.Names()[0])
+
+	// A window at (646, 52) with a button 39 by 3 pixels into it. GTK 4
+	// reports a zero origin in screen coordinates. An XWayland client reports
+	// real screen positions there.
+	window := image.Pt(646, 52)
+	inside := image.Pt(39, 3)
+
+	gtk4Frame := child("gtk4", "frame", atspiStateShowing)
+	gtk4Button := child("gtk4_button", "button", atspiStateShowing, atspiStateSensitive)
+	gtk4Button.windowOrigin = inside
+	gtk4Frame.children = []*fakeAccessible{gtk4Button}
+
+	xwaylandFrame := child("xwayland", "frame", atspiStateShowing)
+	xwaylandFrame.screenOrigin = window
+	xwaylandButton := child("xwayland_button", "button", atspiStateShowing, atspiStateEnabled)
+	xwaylandButton.screenOrigin = window.Add(inside)
+	xwaylandButton.windowOrigin = inside
+	xwaylandFrame.children = []*fakeAccessible{xwaylandButton}
+
+	// A toolkit that draws a shadow around its window puts the frame, and
+	// every element with it, that far into its own window coordinates.
+	shadow := image.Pt(26, 23)
+
+	shadowFrame := child("shadow", "frame", atspiStateShowing)
+	shadowFrame.windowOrigin = shadow
+	shadowButton := child("shadow_button", "button", atspiStateShowing, atspiStateEnabled)
+	shadowButton.windowOrigin = shadow.Add(inside)
+	shadowFrame.children = []*fakeAccessible{shadowButton}
+
+	exportFixture(t, app, gtk4Frame)
+	exportFixture(t, app, xwaylandFrame)
+	exportFixture(t, app, shadowFrame)
+
+	tests := []struct {
+		name   string
+		frame  *fakeAccessible
+		origin fixedOrigin
+		want   image.Point
+	}{
+		{"gtk 4 with the window origin", gtk4Frame, fixedOrigin{window, true}, window.Add(inside)},
+		{
+			"xwayland with the window origin",
+			xwaylandFrame,
+			fixedOrigin{window, true},
+			window.Add(inside),
+		},
+		{"xwayland without the window origin", xwaylandFrame, fixedOrigin{}, window.Add(inside)},
+		{"a frame inset by a shadow", shadowFrame, fixedOrigin{window, true}, window.Add(inside)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := New(zap.NewNop(), nil)
+			client.windowOrigin = test.origin
+
+			place, _ := client.placementFor(t.Context(), scanner, &atspiWindow{ref: test.frame.ref})
+
+			var out []ax.Node
+
+			visited := 0
+			client.walk(t.Context(), scanner, test.frame.ref,
+				rolesSet(resolveLinuxRoles(t, "button")), 0, atspiWalkDepthCeiling, &out, &visited,
+				place, false)
+
+			got := make([]image.Point, 0, len(out))
+			for _, node := range out {
+				got = append(got, node.Bounds().Min)
+			}
+
+			if !slices.Equal(got, []image.Point{test.want}) {
+				t.Errorf("hinted at %v, want one hint at %v", got, test.want)
+			}
+		})
+	}
+}
+
 // hasStates reports whether states has every bit set in want.
 func hasStates(states []uint32, want []int32) bool {
 	for word, bits := range want {
@@ -426,7 +564,7 @@ func TestClient_Scan_ReadsNoDeeperThanMaxDepth(t *testing.T) {
 			client := New(zap.NewNop(), nil)
 
 			nodes, path, _ := client.scan(t.Context(), scanner, frame.ref, roles,
-				test.maxDepth, image.Point{}, false)
+				test.maxDepth, placement{}, false)
 
 			got := make([]string, 0, len(nodes))
 			for _, node := range nodes {
@@ -492,8 +630,7 @@ func scanPaths(
 				atspiWalkDepthCeiling,
 				&out,
 				&visited,
-				0,
-				0,
+				placement{},
 				readState,
 			)
 
@@ -501,7 +638,7 @@ func scanPaths(
 		},
 		"collection": func(client *Client, roles map[string]struct{}) []ax.Node {
 			out, ok := client.collectViaCollection(
-				t.Context(), scanner, frame.ref, roles, 0, 0, readState)
+				t.Context(), scanner, frame.ref, roles, placement{}, readState)
 			if !ok {
 				t.Fatal("the Collection path fell back to the walk")
 			}
