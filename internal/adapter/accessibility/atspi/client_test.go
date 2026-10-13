@@ -345,6 +345,15 @@ func TestDeriveTargetRoleIDs(t *testing.T) {
 		}
 	})
 
+	t.Run("text_field also fetches text, which GTK 3 entries report", func(t *testing.T) {
+		ids := deriveTargetRoleIDs(rolesSet(resolveLinuxRoles(t, "text_field")))
+		if !slices.Contains(ids, atspiRoleNameToID[atspiRoleText]) {
+			t.Errorf("text_field -> %v, want the text role id among them", ids)
+		}
+
+		noDuplicates(t, ids)
+	})
+
 	t.Run("multiple semantic roles union their ids", func(t *testing.T) {
 		ids := deriveTargetRoleIDs(rolesSet(resolveLinuxRoles(t, "list_item", "row", "button")))
 		for _, want := range []int32{32, 90, 43, 62} { // list item, table row, push/toggle button
